@@ -4,9 +4,12 @@ import transformers
 
 class StoryInitializer(object):
     def __init__(self):
-        self.input_list = []
+        # Initialize BERT model
+        model = transformers.BertModel.from_pretrained('bert-base-uncased', return_dict=True).cuda()
+        tokenizer = transformers.BertTokenizer.from_pretrained('bert-base-uncased')
+
+        self.content_list = []
         self.bert_encoding_vector = []
-        self.bert_encoding_list = []
 
         # Plot
         self.title, self.title_bert = '', ''
@@ -35,34 +38,44 @@ class StoryInitializer(object):
 
         # Plot
         self.title = input(self.plot()[0] + '\n')
+        self.title_bert = list(self.bert_embedding(self.title, model, tokenizer))
         self.villain = input(self.plot()[1] + '\n')
-        self.goal = input(self.plot()[2] + '\n')
-        self.input_list.extend([self.title,
-                                             self.villain,
-                                             self.goal])
+        self.villain_bert = list(self.bert_embedding(self.villain, model, tokenizer))
+        self.villain_goal = input(self.plot()[2] + '\n')
+        self.villain_goal_bert = list(self.bert_embedding(self.villain_goal, model, tokenizer))
+        self.content_list.extend([("title", self.title, self.title_bert),
+                                  ("villain", self.villain, self.villain_bert),
+                                  ("villain_goal", self.villain_goal, self.villain_goal_bert)])
         print()
 
         # Characters
         self.creature = input(self.characters()[0] + '\n')
+        self.creature_bert = list(self.bert_embedding(self.creature, model, tokenizer))
         self.archetype = input(self.characters()[1] + '\n')
+        self.archetype_bert = list(self.bert_embedding(self.archetype, model, tokenizer))
         self.companions = input(self.characters()[2] + '\n')
-        self.input_list.extend([self.creature,
-                                             self.archetype,
-                                             self.companions])
+        self.companions_bert = list(self.bert_embedding(self.companions, model, tokenizer))
+        self.content_list.extend([("your_race", self.creature, self.creature_bert),
+                                  ("your_archtype", self.archetype, self.archetype_bert),
+                                  ("your_number_of_companions", self.companions, self.companions_bert)])
         print()
 
         # Setting
         self.kingdom = input(self.setting()[0] + '\n')
+        self.kingdom_bert = list(self.bert_embedding(self.kingdom, model, tokenizer))
         self.landscape = input(self.setting()[1] + '\n')
+        self.landscape_bert = list(self.bert_embedding(self.landscape, model, tokenizer))
         self.magic = input(self.setting()[2] + '\n')
-        self.input_list.extend([self.kingdom,
-                                             self.landscape,
-                                             self.magic])
+        self.magic_bert = list(self.bert_embedding(self.magic, model, tokenizer))
+        self.content_list.extend([("kingdom", self.kingdom, self.kingdom_bert),
+                                  ("kingdom_landscape", self.landscape, self.landscape_bert),
+                                  ("kingdom_magic", self.magic, self.magic_bert)])
         print()
 
         # Sentiment
         self.sentiment = input(self.story_sentiment() + '\n')
-        self.input_list.append(self.sentiment)
+        self.sentiment_bert = list(self.bert_embedding(self.sentiment, model, tokenizer))
+        self.content_list.append(("sentiment", self.sentiment, self.sentiment_bert))
         print()
 
         # Thanks
@@ -70,13 +83,8 @@ class StoryInitializer(object):
         print('Thank you. Generating story...')
 
         # Get BERT embeddings for user inputs
-        model = transformers.BertModel.from_pretrained('bert-base-uncased', return_dict=True).cuda()
-        tokenizer = transformers.BertTokenizer.from_pretrained('bert-base-uncased')
-        for content in self.input_list:
-            output = list(self.bert_embedding(content, model, tokenizer))
-            self.bert_encoding_vector.extend(output)
-            self.bert_encoding_list.append((content, output))
-
+        for content_name, content, content_bert in self.content_list:
+            self.bert_encoding_vector.extend(content_bert)
 
     def bert_embedding(self, content, model, tokenizer):
         encoding = tokenizer.encode_plus(
@@ -121,6 +129,7 @@ class StoryInitializer(object):
 
 def main():
     story_initializer = StoryInitializer()
+    print(story_initializer.content_list)
 
 
 if __name__ == "__main__":
