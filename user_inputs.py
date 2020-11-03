@@ -129,7 +129,6 @@ class StoryInitializer(object):
 
 def main():
     story_initializer = StoryInitializer()
-    print(story_initializer.content_list)
 
 
 if __name__ == "__main__":
