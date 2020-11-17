@@ -243,7 +243,7 @@ class StoryInitializer(object):
         time.sleep(2)
         print('Thank you. Generating story...')
 
-        #pprint.pprint(self.content_dictionary)
+        pprint.pprint(self.content_dictionary)
 
 
     def bert_embedding(self, content, model, tokenizer):
