@@ -6,7 +6,7 @@ import pprint
 class StoryInitializer(object):
     def __init__(self):
         # Initialize BERT model
-        model = transformers.BertModel.from_pretrained('bert-base-uncased', return_dict=True).cuda()
+        model = transformers.BertModel.from_pretrained('bert-base-uncased', return_dict=True)
         tokenizer = transformers.BertTokenizer.from_pretrained('bert-base-uncased')
 
         self.content_dictionary = {}
@@ -255,7 +255,7 @@ class StoryInitializer(object):
             return_token_type_ids=False,
             return_tensors='pt')
 
-        output = model(encoding['input_ids'].cuda(), encoding['attention_mask'].cuda())
+        output = model(encoding['input_ids'], encoding['attention_mask'])
         vector = output[0][0][0].detach().cpu().numpy()
 
         return vector
