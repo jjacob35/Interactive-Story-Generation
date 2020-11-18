@@ -1,9 +1,11 @@
 # adapted from https://github.com/jiyfeng/entitynlm/blob/master/entitynlm.h
+# isaac rehg, November 2020, irehg6@gatech.edu
 import numpy as np
 import torch
 import torch.nn as nn
 
 
+# TODO add dropout
 class EntityContext(nn.Module):
 
     def __init__(self, hidden_dim=256, entity_dim=256, max_ent_length=25, max_entities=64):
@@ -46,65 +48,250 @@ class EntityContext(nn.Module):
         self.bce_loss = torch.nn.BCEWithLogitsLoss()
         self.ce_loss = torch.nn.CrossEntropyLoss()
 
+    def _normalize_E(self, E, sample_idxs, entity_idxs, eps=1e-20):
+        # gradient hack
+        norm = torch.ones(*E.shape[:2]).to(E.device)
+        norm[(sample_idxs, entity_idxs)] = torch.norm(E[(sample_idxs, entity_idxs)], dim=1)
+
+        ret = E / (norm[:,:,None] + eps)
+        return ret
+
     def _sample_embeddings(self, n):
-        z = self.entity_init_mean[None] + torch.randn(n, self.entity_dim) * self.entity_init_var
+        z = self.entity_init_mean[None] + torch.randn(n, self.entity_dim).to(self.entity_init_mean.device) * self.entity_init_var
         norm = torch.sqrt((z ** 2).sum(dim=1))  # [N x 1]
         return z / norm[:,None]
 
     def _add_embeddings(self, E, sample_idxs, entity_idxs):
-        E[(sample_idxs, entity_idxs)] = self._sample_embeddings(len(sample_idxs))
+        #E[(sample_idxs, entity_idxs)] = self._sample_embeddings(len(sample_idxs))
+
+        # hack to make gradients propagate
+        E_update = torch.zeros_like(E).to(E.device)
+        E_update[(sample_idxs, entity_idxs)] = self._sample_embeddings(len(sample_idxs))
+        E = E + E_update
+
+        return E
 
     def _update_embeddings(self, E, h, sample_idxs, entity_idxs):
         proj_e = self.E_forget_op(h)  # [n x entity_dim]
-        f = (E[(sample_idxs, entity_idxs)] * proj_e).sum(dim=1)  # [n]
+        ent_idxs = entity_idxs.cpu()
+        f = (E[(sample_idxs, entity_idxs)] * proj_e).sum(dim=1)[:, None]  # [n x 1]
+        f = torch.sigmoid(f)
         i = self.E_input_op(h)  # [n x entity_dim]
-        E[(sample_idxs, entity_idxs)] = (1 - f) * E[(sample_idxs, entity_idxs)] + f * i
+
+        #E[(sample_idxs, entity_idxs)] = (1 - f) * E[(sample_idxs, entity_idxs)] + f * i
+
+        # hack to make gradients propagate
+        E_update1 = torch.ones_like(E).to(E.device)
+        E_update1[(sample_idxs, entity_idxs)] = -(f - 1)
+        E_update2 = torch.zeros_like(E).to(E.device)
+        E_update2[(sample_idxs, entity_idxs)] = f * i
+        E = E * E_update1 + E_update2
+        E = self._normalize_E(E, sample_idxs, entity_idxs)
+
+        assert not np.any(np.isnan(E.data.cpu().numpy()))
+        return E
+
+    def _update_null_context(self, null_context, curr_e, h, e_mask, br_mask):
+        #null_context[e_mask] = curr_e[e_mask]
+        #null_context[br_mask] = h[br_mask]
+
+        # hack to make gradients propagate
+        ctxt_add = torch.zeros_like(curr_e).to(curr_e.device)
+        ctxt_add[e_mask] = curr_e[e_mask]
+        ctxt_subtract = torch.zeros_like(curr_e).to(curr_e.device)
+        ctxt_subtract[e_mask] = null_context[e_mask]
+        null_context = null_context - ctxt_subtract + ctxt_add
+
+        ctxt_add = torch.zeros_like(curr_e).to(curr_e.device)
+        ctxt_add[br_mask] = h[br_mask]
+        ctxt_subtract = torch.zeros_like(curr_e).to(curr_e.device)
+        ctxt_subtract[br_mask] = null_context[br_mask]
+        null_context = null_context - ctxt_subtract + ctxt_add
+
+        return null_context
 
     # TODO replace all inplace operations
-    def cell_forward(self, h, entity_cache, current_annotations):
-        e_t, e_idx, e_len = current_annotations  # e_t: entity label {0, 1}, e_idx: entity id, e_len: mention length
-        E, n_entities, e_dists, null_context = entity_cache  # E: [N x max_entities x entity_dim], n_entities: [N x 1]
-                                                             # e_dists: [N x 1], null_context: [N x entity_dim]
+    def cell_forward(self, h, entity_cache, current_annotations, final_tok=None, debug_var=None):
+        if final_tok is None:
+            final_tok = np.zeros(h.shape[0]).astype(np.bool_)
 
-        e_mask = e_t == 1  # get samples with entities present for this time step
-        new_e_mask = e_idx >= n_entities  # get samples whose current entity is new
+        e_t, e_idx, e_len = current_annotations  # e_t: entity label {0, 1}, e_idx: entity id, e_len: mention length
+        E, n_entities, e_dists, null_context = entity_cache  # E: entity_dim], n_entities: [N x 1]
+                                                             # e_dists: [N x 1], null_context: [N x entity_dim]
+        e_mask = e_t.cpu() == 1  # get samples with entities present for this time step
+        new_e_mask = e_idx.cpu() >= n_entities  # get samples whose current entity is new
         max_e_reached = n_entities == self.max_entities  # get samples where the entity max has been reached
         if max_e_reached.sum() > 0:
             print("WARNING: Maximum entity threshold reached")
 
         # add new embeddings for new entities
         new_e_idxs, = np.where(np.logical_and(new_e_mask, ~max_e_reached))
-        self._add_embeddings(E, new_e_idxs, n_entities[new_e_idxs])
+        if len(new_e_idxs) > 0:
+            E = self._add_embeddings(E, new_e_idxs, n_entities[new_e_idxs])
+
+            assert not np.any(np.isinf(E.data.cpu().numpy()))
 
         # update embeddings
         update_e_idxs, = np.where(e_mask)
-        self._update_embeddings(E, h[update_e_idxs], update_e_idxs, e_idx[update_e_idxs])
+        if len(update_e_idxs) > 0:
+            assert not np.any(np.isinf(E.data.cpu().numpy()))
+            E_ = E.clone()
+            E = self._update_embeddings(E, h[update_e_idxs], update_e_idxs, e_idx[update_e_idxs])
+
+            assert not np.any(np.isinf(E.data.cpu().numpy()))
 
         # TODO check  whether referencing over all e_idxs is problematic
-        e_idx[e_idx < 0] = 0
-        curr_e = E[(np.arange(E.shape[0]), e_idx)]  # [N x entity_dim]
+        e_idx_tmp = e_idx.clone()
+        e_idx_tmp[e_idx < 0] = 0
+        curr_e = E[(np.arange(E.shape[0]), e_idx_tmp)]  # [N x entity_dim]
 
         # update null_context
-        null_context[e_mask] = curr_e[e_mask]  # [N x entity_dim]
+        null_context = self._update_null_context(null_context, curr_e, h, e_mask, final_tok)  # [N x entity_dim]
 
         # predict next e_t
         out_e_t = self.R_op(h)
 
         # predict next e_idx
         proj_e = self.E_context_op(h)  # [N x entity_dim]
-        #out_e_idx = torch.matmul(E, proj_e[:,None])  # [N x max_entities] TODO debug
-        out_e_idx = (E * proj_e[:,None]).sum(dim=2)  # [N x max_entities] TODO debug (equivalent ^)
-        out_e_idx += torch.exp(e_dists * self.lambda_dist)  # [N x max_entities] TODO debug
+        #out_e_idx = torch.matmul(proj_e[None], E) - torch.exp(e_dists * self.lambda_dist) # [N x max_entities] TODO debug
+        out_e_idx = (E * proj_e[:,None]).sum(dim=2) - torch.exp(e_dists * self.lambda_dist)  # [N x max_entities] TODO debug
+
+        assert not np.any(np.isnan(out_e_idx.data.cpu().numpy()))
 
         # predict next mention lengths
         length_input = torch.cat([h, curr_e], dim=1)  # [N x hidden_dim + entity_dim]
         out_e_len = self.L_op(length_input)  # [N x max_ent_length]
 
         # generate conditioning vectors for word sampling
-        out_x = torch.where(e_mask, self.X_op(curr_e), self.X_null_op(null_context))  # [N x hidden_dim]
+        out_x = torch.where(e_mask[:, None].to(curr_e.device), self.X_op(curr_e),
+                            self.X_null_op(null_context))  # [N x hidden_dim]
 
-        return out_e_t, out_e_idx, out_e_len, out_x
+        # update e_dists for samples that are starting a new sequence
+        e_dists = e_dists.clone()
+        e_dists[final_tok] += 1.0
+        e_dists[(new_e_idxs, n_entities[new_e_idxs])] = 0.0
+        e_dists[(update_e_idxs, e_idx[update_e_idxs])] = 0.0
 
-    def forward(self, h):
-        # TODO set null_context to final hidden state when sentence is finished
-        pass
+        # update n_entities
+        n_entities = n_entities.clone()
+        n_entities[new_e_idxs] = n_entities[new_e_idxs] + 1
+
+        # build next iteration's entity cache
+        next_cache = E, n_entities, e_dists, null_context
+
+        nans = [len(np.where(np.isnan(t.data.cpu()))[0]) for t in [out_e_t, out_e_idx, out_e_len, out_x]]
+
+        return out_e_t, out_e_idx, out_e_len, out_x, next_cache
+
+
+class EntitiyNLM(nn.Module):
+
+    def __init__(self, vocab_size, embed_dim=256, hidden_dim=256, entity_dim=256, max_ent_length=25, max_entities=64,
+                 break_tok_idx=None):
+        super(EntitiyNLM, self).__init__()
+        self.break_tok_idx = break_tok_idx
+        self.embed = nn.Embedding(vocab_size, embed_dim)
+        self.entity_encoder = EntityContext(hidden_dim=hidden_dim, entity_dim=entity_dim, max_ent_length=max_ent_length,
+                                            max_entities=max_entities)
+        self.lstm = nn.LSTMCell(embed_dim, hidden_dim)
+        self.out_layer = nn.Linear(hidden_dim, vocab_size)
+
+    def cell_forward(self, x, states, entity_cache, entity_annotations, final_tok=None, debug_var=None):
+        h, c = states
+        embed = self.embed(x)
+        h, c = self.lstm(embed, (h, c))
+        out_e_t, out_e_idx, out_e_len, cond_x, next_e_cache = self.entity_encoder.cell_forward(h, entity_cache,
+                                                                                               entity_annotations,
+                                                                                               final_tok=final_tok,
+                                                                                               debug_var=debug_var)
+        out_x = self.out_layer(h + cond_x)
+        return (h, c), (out_e_t, out_e_idx, out_e_len, out_x), next_e_cache
+
+    def forward(self, xs, states, entity_annotations, default_context=None):
+        h, c = states
+        seq_len, batch = xs.shape
+
+        # get sentence completion mask
+        if self.break_tok_idx is not None:
+            final_toks = xs[1:] == self.break_tok_idx
+
+        # initialize entity cache
+        if default_context is None:
+            default_context = self.entity_encoder.default_context[None].repeat(batch, 1).to(xs.device)
+        entity_cache = (
+            torch.zeros(batch, self.entity_encoder.max_entities, self.entity_encoder.entity_dim).to(xs.device),
+            torch.zeros(batch).long(),  # keep n_entities on cpu
+            torch.zeros(batch, self.entity_encoder.max_entities).to(xs.device),  # keep e_dists as float
+            default_context
+        )
+
+        # todo debug
+        debug_var = None
+
+        e_ts, e_idxs, e_lens = entity_annotations
+        out_e_ts, out_e_idxs, out_e_lens, out_xs = [], [], [], []
+        for i, (x, e_t, e_idx, e_len) in enumerate(zip(xs[:-1], e_ts[:-1], e_idxs[:-1], e_lens[:-1])):
+            final_tok = final_toks[i] if self.break_tok_idx is not None else None
+            (h, c), (out_e_t, out_e_idx, out_e_len, out_x), entity_cache = self.cell_forward(x, (h, c), entity_cache,
+                                                                                             (e_t, e_idx, e_len),
+                                                                                             final_tok=final_tok,
+                                                                                             debug_var=debug_var)
+
+            out_e_ts += [out_e_t]
+            out_e_idxs += [out_e_idx]
+            out_e_lens += [out_e_len]
+            out_xs += [out_x]
+
+        return (
+            h,
+            (
+                torch.stack(out_e_ts),
+                torch.stack(out_e_idxs),
+                torch.stack(out_e_lens),
+                torch.stack(out_xs)
+            )
+        )
+
+    def predict_entity(self, xs, states, default_context=None):
+        h, c = states
+        seq_len, batch = xs.shape
+
+        # get sentence completion mask
+        if self.break_tok_idx is not None:
+            final_toks = xs[1:] == self.break_tok_idx
+
+        # initialize entity cache
+        if default_context is None:
+            default_context = self.entity_encoder.default_context[None].repeat(batch, 1).to(xs.device)
+        entity_cache = (
+            torch.zeros(batch, self.entity_encoder.max_entities, self.entity_encoder.entity_dim).to(xs.device),
+            torch.zeros(batch).long(),  # keep n_entities on cpu
+            torch.zeros(batch, self.entity_encoder.max_entities).to(xs.device),  # keep e_dists as float
+            default_context
+        )
+
+        # set initial entity annotations
+        e_t = torch.zeros(batch).to(xs.device) - 1
+        e_idx = torch.zeros(batch).to(xs.device) - 1
+        e_len = torch.ones(batch).to(xs.device)
+
+        pred_e_ts, pred_e_idxs, pred_e_lens = [], [], []
+        with torch.no_grad():
+            for i, x in enumerate(xs[:-1]):
+                final_tok = final_toks[i] if self.break_tok_idx is not None else None
+                (h, c), (out_e_t, out_e_idx, out_e_len), entity_cache = self.cell_forward(x, (h, c), entity_cache,
+                                                                                          (e_t, e_idx, e_len),
+                                                                                          final_tok=final_tok)
+                e_t = out_e_t.argmax(dim=1)
+                e_idx = torch.where(e_t >= 0, out_e_idx.argmax(dim=1), torch.zeros(batch) - 1)
+                e_len = torch.where(e_t >= 0, out_e_len.argmax(dim=1), torch.ones(batch))
+
+                pred_e_ts += [e_t]
+                pred_e_idxs += [e_idx]
+                pred_e_lens += [e_len]
+
+        return (
+            torch.stack(pred_e_ts),
+            torch.stack(pred_e_idxs),
+            torch.stack(pred_e_lens)
+        )
