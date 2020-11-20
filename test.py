@@ -2,8 +2,8 @@ from argparse import ArgumentParser
 from tqdm.auto import tqdm
 import numpy as np
 import torch
-from torchtext.data import Field, TabularDataset, BucketIterator
-from entity_nlm import EntitiyNLM
+from torchtext.data import Field, TabularDataset, BucketIterator, Iterator
+from entity_nlm import EntitiyNLM, EntityOverflow
 torch.autograd.set_detect_anomaly(True)
 
 
@@ -12,7 +12,7 @@ MAX_ENT_LENGTH = 50
 MAX_NUM_ENTITIES = 64
 HIDDEN_SIZE = 256
 BATCH_SIZE = 8
-LR = 0.0008
+LR = 0.0005
 DATA_DIR = '../data/'
 loss_fn = torch.nn.CrossEntropyLoss()
 
@@ -33,7 +33,7 @@ def load_data():
                                                                                   ('labels', LABELS),
                                                                                   ('length', LENGTH)],
                              skip_header=True)
-    train_loader = BucketIterator(
+    train_loader = Iterator(
         dataset=train_set, batch_size=BATCH_SIZE,
         sort_key=lambda x: len(x.text),
         sort_within_batch=True,
@@ -110,6 +110,7 @@ def main():
 
     null_ent = -1
     br_tok_idx = TEXT.vocab.stoi['<br>']
+    pad_idx = TEXT.vocab.stoi['<pad>']
     vocab_len = len(TEXT.vocab)
 
     model = EntitiyNLM(vocab_len, hidden_dim=HIDDEN_SIZE, entity_dim=HIDDEN_SIZE, max_ent_length=MAX_ENT_LENGTH,
@@ -148,8 +149,11 @@ def main():
         # set initial states
         states = torch.zeros(curr_batch_size, HIDDEN_SIZE).to(device), torch.zeros(curr_batch_size, HIDDEN_SIZE).to(device)
 
+        pad_mask = text[1:] != pad_idx
+
         # only evalutate entity losses after entity has changed (or no entity is being iterated)
-        e_t_loss_mask = e_len[1:] == 1
+        e_t_loss_mask = e_len[:-1] == 1
+        e_t_loss_mask = np.logical_and(e_t_loss_mask, pad_mask).type(torch.bool)
 
         # additionally only evaluate entity selection (idx or len) losses when the next token is part of a mention
         e_sel_loss_mask = e_present[1:]
@@ -158,28 +162,31 @@ def main():
         text = text.to(device)
         e_t, e_idx, e_len = e_t.to(device), e_idx.to(device), e_len.to(device)
 
-        h, (pe_t, pe_idx, pe_len, ptext) = model(text, states, (e_t, e_idx, e_len))
+        try:
+            h, (pe_t, pe_idx, pe_len, ptext) = model(text, states, (e_t, e_idx, e_len))
+        except EntityOverflow:
+            continue
 
         # compute e_t loss
         e_t_loss = loss_fn(pe_t[e_t_loss_mask], e_t[1:][e_t_loss_mask])
 
-        # TODO verify entitiy idxs are aligning properly
-        # compute e_idx loss
-        e_idx_loss = loss_fn(pe_idx[e_sel_loss_mask], e_idx[1:][e_sel_loss_mask])
+        new_e_mask = pe_idx == float('-inf')  # new entities will have -inf log likelihood fixed by the model
+        new_e_mask = new_e_mask[e_sel_loss_mask]
+        e_idx_filtered = e_idx[1:][e_sel_loss_mask]
+        inval_preds = new_e_mask[(np.arange(len(e_idx_filtered)), e_idx_filtered)]
+        e_idx_filtered[inval_preds] = 0  # set labels for new entities to zero
+        e_idx_loss = loss_fn(pe_idx[e_sel_loss_mask], e_idx_filtered)
 
         # compute e_len loss
-        pe_len_ = pe_len.cpu()
-        e_len_ = e_len.cpu()
         e_len_loss = loss_fn(pe_len[e_sel_loss_mask], e_len[1:][e_sel_loss_mask])
 
         # compute word loss
 
-        t = text.cpu()
-        w_loss = loss_fn(ptext.flatten(end_dim=1), text[1:].flatten())
+        w_loss = loss_fn(ptext[pad_mask], text[1:][pad_mask])
 
         loss = e_t_loss + e_idx_loss + e_len_loss + w_loss
         loss.backward()
-        print(loss.item())
+        print(loss.item(), w_loss.item(), e_t_loss.item(), e_idx_loss.item(), e_len_loss.item())
         optim.step()
         optim.zero_grad()
 

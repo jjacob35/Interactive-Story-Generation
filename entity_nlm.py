@@ -52,22 +52,22 @@ class EntityContext(nn.Module):
 
     def _initialize_E(self, batch_size, eps=1e-20, device=0):
         # allocate extra dimension at index 0 for prediction of new entities
-        E = torch.zeros(batch_size, self.entity_encoder.max_entities + 1, self.entity_encoder.entity_dim).to(device)
-        E[:, 0] = self.entity_init_mean[None].to(device)
-        norm = torch.norm(E[:, 0], dim=1)
-        return E / (norm[:, None] + eps)
+        E = torch.zeros(batch_size, self.max_entities + 1, self.entity_dim).to(device)
+        E[:, 0] = (self.entity_init_mean / (torch.norm(self.entity_init_mean) + eps))[None].to(device)
+        return E
 
     def _initialize_n_entities(self, batch_size):
         return torch.ones(batch_size).long()
 
     def _initialize_e_dists(self, batch_size, device=0):
         # filler at index 0 for new entity prediction, remains 0
-        return torch.zeros(batch_size, self.entity_encoder.max_entities + 1).to(device)
+        return torch.zeros(batch_size, self.max_entities + 1).to(device)
 
     def _initialize_e_idx_lookup(self, batch_size, device=0):
         # allocate one extra dimension at last index for indexing of non-entity labels (which are set to -1)
-        lookup = torch.zeros(batch_size, self.entity_encoder.max_entities + 1).to(device).long()
-        lookup[:, -1] = -1  # set the last entity lookup to -1 to catch non-entities and set them back to -1
+        lookup = torch.zeros(batch_size, self.max_entities + 2).to(device).bool()
+        #lookup[:, -1] = -1  # set the last entity lookup to -1 to catch non-entities and set them back to -1
+        lookup[:, 0] = True
         return lookup
 
     def _normalize_E(self, E, sample_idxs, entity_idxs, eps=1e-20):
@@ -88,7 +88,7 @@ class EntityContext(nn.Module):
 
         # hack to make gradients propagate
         E_update = torch.zeros_like(E).to(E.device)
-        assert E[(sample_idxs, entity_idxs)].sum().item() == 0, 'Space for new entitiy embeddings should be initialized to 0'
+        #assert E[(sample_idxs, entity_idxs)].sum().item() == 0, 'Space for new entitiy embeddings should be initialized to 0'
         E_update[(sample_idxs, entity_idxs)] = self._sample_embeddings(len(sample_idxs))
         E = E + E_update
 
@@ -96,7 +96,6 @@ class EntityContext(nn.Module):
 
     def _update_embeddings(self, E, h, sample_idxs, entity_idxs):
         proj_e = self.E_forget_op(h)  # [n x entity_dim]
-        ent_idxs = entity_idxs.cpu()
         f = (E[(sample_idxs, entity_idxs)] * proj_e).sum(dim=1)[:, None]  # [n x 1]
         f = torch.sigmoid(f)
         i = self.E_input_op(h)  # [n x entity_dim]
@@ -111,7 +110,7 @@ class EntityContext(nn.Module):
         E = E * E_update1 + E_update2
         E = self._normalize_E(E, sample_idxs, entity_idxs)
 
-        assert not np.any(np.isnan(E.data.cpu().numpy()))
+        #assert not np.any(np.isnan(E.data.cpu().numpy()))
         return E
 
     def _update_null_context(self, null_context, curr_e, h, e_mask, br_mask):
@@ -153,39 +152,62 @@ class EntityContext(nn.Module):
         E, n_entities, e_dists, null_context, e_idx_lookup = entity_cache  # E: entity_dim], n_entities: [N x 1]
                                                              # e_dists: [N x 1], null_context: [N x entity_dim]
 
-        # update the entity index lookup
-        n_entities = n_entities.to(e_idx.device)
-        selected_idxs = e_idx_lookup[(np.arange(len(e_idx)), e_idx)]
-        e_idx_lookup[(np.arange(len(e_idx)), e_idx)] = torch.where(selected_idxs == 0, n_entities, selected_idxs)
-        n_entities = n_entities.to('cpu')
+        """
+        # set entity indices for new entities to 0
+        e_idx_true = e_idx.clone()
+        e_idx = torch.where(e_idx_lookup[(np.arange(len(e_idx)), e_idx)], e_idx, torch.zeros_like(e_idx).to(e_idx.device))
+        #e_idx = e_idx_lookup[(np.arange(len(e_idx)), e_idx)]
+        e_idx[e_t == 0] = -1
+
+        # update the entity index lookup with new entities
+        e_idx_lookup[(np.arange(len(e_idx_true)), e_idx_true)] = True #torch.where(e_t > 0, e_idx_true, selected_idxs)
 
         # set entity indices to those sorted by order in which they were seen
         e_idx = e_idx_lookup[(np.arange(len(e_idx)), e_idx)].to(e_idx.device)
         assert not np.any(e_idx.cpu() == 0), '0 index is reserved for new entity predictions'
 
-        e_mask = e_t.cpu() == 1  # get samples with entities present for this time step
         assert not np.any(e_idx.cpu() > n_entities), 'we ad one entitity at a time and increment n_entities each time so should never be greater'
         new_e_mask = e_idx.cpu() == n_entities  # get samples whose current entity is new
-        max_e_reached = n_entities == self.max_entities  # get samples where the entity max has been reached
+        """
+        e_idx = e_idx + 1  # add one to avoid referencing 0th index of E (reserved for new entities)
+        e_mask = e_t.cpu() == 1  # get samples with entities present for this time step
+
+        new_e_mask = np.logical_and(~e_idx_lookup[(np.arange(len(e_idx)), e_idx)].clone().cpu(), e_mask)
+        new_e_idxs, = np.where(new_e_mask)
+
+        # update e_idx_lookup
+        e_idx_lookup[(np.arange(len(e_idx)), e_idx)] = True
+
+        # update n_entities
+        n_entities = n_entities.clone()
+        n_entities[new_e_idxs] = n_entities[new_e_idxs] + 1
+
+        max_e_reached = n_entities > self.max_entities  # get samples where the entity max has been reached
         if max_e_reached.sum() > 0:
             print("WARNING: Maximum entity threshold reached. Skipping batch...")
             raise EntityOverflow
 
         # add new embeddings for new entities
-        new_e_idxs, = np.where(np.logical_and(new_e_mask, ~max_e_reached))
         if len(new_e_idxs) > 0:
-            E = self._add_embeddings(E, new_e_idxs, n_entities[new_e_idxs])
+            E = self._add_embeddings(E, new_e_idxs, e_idx[new_e_idxs])
 
-            assert not np.any(np.isinf(E.data.cpu().numpy()))
+            #assert not np.any(np.isinf(E.data.cpu().numpy()))
 
         # update embeddings
         update_e_idxs, = np.where(e_mask)
         if len(update_e_idxs) > 0:
-            assert not np.any(np.isinf(E.data.cpu().numpy()))
-            E_ = E.clone()
+            #assert not np.any(np.isinf(E.data.cpu().numpy()))
             E = self._update_embeddings(E, h[update_e_idxs], update_e_idxs, e_idx[update_e_idxs])
 
-            assert not np.any(np.isinf(E.data.cpu().numpy()))
+            #assert not np.any(np.isinf(E.data.cpu().numpy()))
+
+        # update e_dists for samples that are starting a new sequence
+        e_dists = e_dists.clone()
+        e_dists[final_tok] += 1.0
+        #e_dists[(new_e_idxs, e_idx[new_e_idxs])] = 0.0
+        e_dists[(update_e_idxs, e_idx[update_e_idxs])] = 0.0
+        e_dists[:, 0] = 0.0  # new entity index remains 0
+        #assert all([x in update_e_idxs for x in new_e_idxs]), 'all new entities should be updated'
 
         """
         e_idx_tmp = e_idx.clone()
@@ -193,7 +215,7 @@ class EntityContext(nn.Module):
         """
         curr_e = E[(np.arange(E.shape[0]), e_idx)]  # [N x entity_dim]
 
-        assert not np.any(np.logical_and(e_idx == -1, e_mask))
+        #assert not np.any(np.logical_and(e_idx.cpu() == -1, e_mask).numpy())
 
         # update null_context
         null_context = self._update_null_context(null_context, curr_e, h, e_mask, final_tok)  # [N x entity_dim]
@@ -207,36 +229,22 @@ class EntityContext(nn.Module):
         out_e_idx = (E * proj_e[:,None]).sum(dim=2) - torch.exp(e_dists * self.lambda_dist)  # [N x max_entities] TODO debug
 
         # set dims corresponding to not-yet-seen entities to -inf
-        for i in range(out_e_idx.shape[0]):  # since our batch size is small lol
-            out_e_idx[i, n_entities[i] + 1:] = float('-inf')
+        out_e_idx[~e_idx_lookup[:, :-1]] = float('-inf')
 
-        assert not np.any(np.isnan(out_e_idx.data.cpu().numpy()))
+        #assert not np.any(np.isnan(out_e_idx.data.cpu().numpy()))
 
         # predict next mention lengths
-        length_input = torch.cat([h, torch.where(e_t > 0, curr_e, null_context)], dim=1)  # [N x hidden_dim + entity_dim]
+        length_input = torch.cat([h, torch.where(e_mask[:, None].to(curr_e.device),
+                                                 curr_e, null_context)], dim=1)  # [N x hidden_dim + entity_dim]
         out_e_len = self.L_op(length_input)  # [N x max_ent_length]
 
         # generate conditioning vectors for word sampling
         out_x = torch.where(e_mask[:, None].to(curr_e.device), self.X_op(curr_e),
                             self.X_null_op(null_context))  # [N x hidden_dim]
 
-        # update e_dists for samples that are starting a new sequence
-        e_dists = e_dists.clone()
-        e_dists[final_tok] += 1.0
-        e_dists[(new_e_idxs, n_entities[new_e_idxs])] = 0.0
-        e_dists[(update_e_idxs, e_idx[update_e_idxs])] = 0.0
-        e_dists[:, 0] = 0.0  # new entity index remains 0
-
-        # update n_entities
-        n_entities = n_entities.clone()
-        n_entities[new_e_idxs] = n_entities[new_e_idxs] + 1
-
         # build next iteration's entity cache
         next_cache = E, n_entities, e_dists, null_context, e_idx_lookup
 
-        nans = [len(np.where(np.isnan(t.data.cpu()))[0]) for t in [out_e_t, out_e_idx, out_e_len, out_x]]
-
-        # TODO reorder out_e_idx using e_idx_lookup
         # TODO validate ordering - probably good
         return out_e_t, out_e_idx, out_e_len, out_x, next_cache
 
