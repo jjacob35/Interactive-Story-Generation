@@ -252,24 +252,25 @@ class EntityContext(nn.Module):
 class EntitiyNLM(nn.Module):
 
     def __init__(self, vocab_size, embed_dim=256, hidden_dim=256, entity_dim=256, max_ent_length=25, max_entities=64,
-                 break_tok_idx=None):
+                 break_tok_idx=None, dropout=0.0, n_layers=1):
         super(EntitiyNLM, self).__init__()
         self.break_tok_idx = break_tok_idx
         self.embed = nn.Embedding(vocab_size, embed_dim)
         self.entity_encoder = EntityContext(hidden_dim=hidden_dim, entity_dim=entity_dim, max_ent_length=max_ent_length,
                                             max_entities=max_entities)
-        self.lstm = nn.LSTMCell(embed_dim, hidden_dim)
+        #self.lstm = nn.LSTMCell(embed_dim, hidden_dim)
+        self.lstm = nn.LSTM(embed_dim, hidden_dim, num_layers=n_layers, dropout=dropout)
         self.out_layer = nn.Linear(hidden_dim, vocab_size)
 
     def cell_forward(self, x, states, entity_cache, entity_annotations, final_tok=None, debug_var=None):
         h, c = states
         embed = self.embed(x)
-        h, c = self.lstm(embed, (h, c))
-        out_e_t, out_e_idx, out_e_len, cond_x, next_e_cache = self.entity_encoder.cell_forward(h, entity_cache,
+        _, (h, c) = self.lstm(embed[None], (h, c))
+        out_e_t, out_e_idx, out_e_len, cond_x, next_e_cache = self.entity_encoder.cell_forward(h[-1], entity_cache,
                                                                                                entity_annotations,
                                                                                                final_tok=final_tok,
                                                                                                debug_var=debug_var)
-        out_x = self.out_layer(h + cond_x)
+        out_x = self.out_layer(h[-1] + cond_x)
         return (h, c), (out_e_t, out_e_idx, out_e_len, out_x), next_e_cache
 
     def forward(self, xs, states, entity_annotations, default_context=None):

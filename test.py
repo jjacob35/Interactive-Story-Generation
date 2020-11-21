@@ -13,6 +13,7 @@ MAX_NUM_ENTITIES = 64
 HIDDEN_SIZE = 256
 BATCH_SIZE = 8
 LR = 0.0005
+N_LAYERS = 2
 DATA_DIR = '../data/'
 loss_fn = torch.nn.CrossEntropyLoss()
 
@@ -114,7 +115,7 @@ def main():
     vocab_len = len(TEXT.vocab)
 
     model = EntitiyNLM(vocab_len, hidden_dim=HIDDEN_SIZE, entity_dim=HIDDEN_SIZE, max_ent_length=MAX_ENT_LENGTH,
-                       max_entities=MAX_NUM_ENTITIES, break_tok_idx=br_tok_idx).cuda(device)
+                       max_entities=MAX_NUM_ENTITIES, break_tok_idx=br_tok_idx, n_layers=N_LAYERS).cuda(device)
 
     optim = torch.optim.SGD(model.parameters(), lr=LR, momentum=0.9)
 
@@ -147,7 +148,7 @@ def main():
             continue
 
         # set initial states
-        states = torch.zeros(curr_batch_size, HIDDEN_SIZE).to(device), torch.zeros(curr_batch_size, HIDDEN_SIZE).to(device)
+        states = torch.zeros(N_LAYERS, curr_batch_size, HIDDEN_SIZE).to(device), torch.zeros(N_LAYERS, curr_batch_size, HIDDEN_SIZE).to(device)
 
         pad_mask = text[1:] != pad_idx
 
