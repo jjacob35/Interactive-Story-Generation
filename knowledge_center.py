@@ -98,8 +98,11 @@ class KnowledgeCenter:
         self.char2vertex = {}
     
     def createCharacterVertex(self, attributes, relations):
-        self.charGraph.add_vertices(1)
-        currVert = self.charGraph.vs[-1]
+        if attributes["Name"] in self.char2vertex:
+            currVert = self.char2vertex[attributes["Name"]]
+        else:
+            self.charGraph.add_vertices(1)
+            currVert = self.charGraph.vs[-1]
         for key, val in attributes.items():
             if key == "Name":
                 self.char2vertex[val] = currVert
@@ -112,11 +115,13 @@ class KnowledgeCenter:
                 self.charGraph.add_edges([(currVert.index, relIndex)])
                 relId = self.charGraph.get_eid(currVert.index, relIndex)
                 self.charGraph.es[relId]["Relation"] = relation
-        print("Character Added!")
+        return currVert
 
     def createRelation(self, charSrc="", charDest="", relation=""):
-        charSrcV = self.char2vertex.get(charSrc, None)
-        charDestV = self.char2vertex.get(charDest, None)
+        charSrcV = self.char2vertex.get(charSrc, self.createCharacterVertex({"Name":charSrc}, {}))
+        charDestV = self.char2vertex.get(charDest, self.createCharacterVertex({"Name":charDest}, {}))
+        # charSrcV = self.char2vertex.get(charSrc, None)
+        # charDestV = self.char2vertex.get(charDest, None)
         if charSrcV and charDestV:
             srcIndex = charSrcV.index
             destIndex = charDestV.index
@@ -130,39 +135,40 @@ class KnowledgeCenter:
 
 
 
-    def outputGraph(self):
+    def outputGraph(self, name):
         layout = self.charGraph.layout("kk")
         self.charGraph.vs["label"] = self.charGraph.vs["Name"]
         self.charGraph.es["label"] = self.charGraph.es["Relation"]
-        color_dict = {"Hero": "green", "Villian": "red", "Main Hero":"green", "Main Villian":"red"}
+        color_dict = {"Hero": "blue", "Villian": "orange", "Main Hero":"green", "Main Villian":"red", None:"yellow"}
+        print(self.charGraph.vs[0])
         self.charGraph.vs["color"] = [color_dict[charType] for charType in self.charGraph.vs["Type"]]
-        plot(self.charGraph, target="output.png", layout = layout)
+        plot(self.charGraph, target=name, layout = layout)
         # self.charGraph.write_svg("output" + str(time.time()).split(".")[0] + ".svg", layout=layout)
 
-def extractRelationTuple(text):
-    relationTuple = tuple()
-    doc = nlp(text)
-    for tok in doc:
-        if tok.dep_ == "ROOT":
-            relSrc = next(tok.lefts).text
-            foundObj = None
-            relation = tok.text
-            updatedRel = False
-            while not foundObj:
-                currElem = next(tok.rights, None)
-                if currElem and currElem.dep_ == "attr" and not updatedRel:
-                    relation = currElem.text
-                    updatedRel = True
-                if not currElem:
-                    break
-                elif currElem.dep_.endswith("obj"):
-                    foundObj = currElem.text
-                else:
-                    tok = currElem
-            relDest = foundObj
-            relationTuple = (relSrc, relDest, relation)
-            break
-    return relationTuple
+    def extractRelationTuple(self, text):
+        relationTuple = tuple()
+        doc = nlp(text)
+        for tok in doc:
+            if tok.dep_ == "ROOT":
+                relSrc = next(tok.lefts).text
+                foundObj = None
+                relation = tok.text
+                updatedRel = False
+                while not foundObj:
+                    currElem = next(tok.rights, None)
+                    if currElem and currElem.dep_ == "attr" and not updatedRel:
+                        relation = currElem.text
+                        updatedRel = True
+                    if not currElem:
+                        break
+                    elif currElem.dep_.endswith("obj"):
+                        foundObj = currElem.text
+                    else:
+                        tok = currElem
+                relDest = foundObj
+                relationTuple = (relSrc, relDest, relation)
+                break
+        return relationTuple
 
 if __name__ == "__main__":
     prop = ProppStory()
@@ -173,18 +179,20 @@ if __name__ == "__main__":
     print(prop.missingFields())
 
     kc = KnowledgeCenter()
-    kc.createCharacterVertex({"Name": "LukeSkywalker", "Gender":"M", "Type":"Main Hero"}, {})
-    kc.createCharacterVertex({"Name": "DarthVader", "Gender":"M", "Type":"Main Villian"}, {})
-    kc.createCharacterVertex({"Name": "HanSolo", "Gender":"M", "Type":"Hero"}, {})
-    kc.createCharacterVertex({"Name": "Chewbacca", "Gender":"M", "Type":"Hero"}, {})
-    relationTuple = extractRelationTuple("DarthVader is the father of LukeSkywalker")
-    kc.createRelation(*relationTuple)
-    kc.createRelation(*extractRelationTuple("HanSolo is an ally of LukeSkywalker."))
-    kc.createRelation(*extractRelationTuple("HanSolo is an ally of Chewbacca."))
-    kc.createRelation(*extractRelationTuple("Chewbacca is an ally of HanSolo"))
-    kc.createRelation(*extractRelationTuple("Chewbacca is an ally of LukeSkywalker"))
-    kc.createRelation(*extractRelationTuple("LukeSkywalker is an ally of HanSolo"))
-    kc.createRelation(*extractRelationTuple("LukeSkywalker is an ally of Chewbacca"))
+    # kc.createCharacterVertex({"Name": "LukeSkywalker", "Gender":"M", "Type":"Main Hero"}, {})
+    # kc.createCharacterVertex({"Name": "DarthVader", "Gender":"M", "Type":"Main Villian"}, {})
+    # kc.createCharacterVertex({"Name": "HanSolo", "Gender":"M", "Type":"Hero"}, {})
+    # kc.createCharacterVertex({"Name": "Chewbacca", "Gender":"M", "Type":"Hero"}, {})
+    relationTuple = kc.extractRelationTuple("These babies are all under the care of the Empire anyway")
+    print(relationTuple)
+    # kc.createRelation(*relationTuple)
+    # kc.createRelation(*extractRelationTuple("HanSolo is an ally of LukeSkywalker."))
+    # kc.createRelation(*extractRelationTuple("HanSolo is an ally of Chewbacca."))
+    # kc.createRelation(*extractRelationTuple("Chewbacca is an ally of HanSolo"))
+    # kc.createRelation(*extractRelationTuple("Chewbacca is an ally of LukeSkywalker"))
+    # kc.createRelation(*extractRelationTuple("LukeSkywalker is an ally of HanSolo"))
+    # kc.createRelation(*extractRelationTuple("LukeSkywalker is an ally of Chewbacca"))
+    kc.createRelation(*kc.extractRelationTuple("These babies are all under the care of the Empire anyway"))
     # kc.createCharacterVertex({"Name": "Darth Vader", "Gender":"M", "Type":"Main Villian"}, {"Luke Skywalker": "Son"})
     # kc.createCharacterVertex({"Name": "Han Solo", "Gender":"M", "Type":"Hero"}, {"Luke Skywalker": "Ally"})
     # kc.createCharacterVertex({"Name": "Princess Leia", "Gender":"F", "Type":"Hero"}, {"Luke Skywalker": "Ally"})
@@ -193,4 +201,4 @@ if __name__ == "__main__":
 
     print(kc.char2vertex)
     print(kc.charGraph)
-    kc.outputGraph()
+    kc.outputGraph("output.png")
