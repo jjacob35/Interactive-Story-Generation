@@ -57,10 +57,11 @@ def sample(load_model=None):
 
     null_ent = -1
     br_tok_idx = TEXT.vocab.stoi['<br>']
+    pad_tok_idx = TEXT.vocab.stoi['<pad>']
     vocab_len = len(TEXT.vocab)
 
     model = EntitiyNLM(vocab_len, hidden_dim=HIDDEN_SIZE, entity_dim=HIDDEN_SIZE, max_ent_length=MAX_ENT_LENGTH,
-                       max_entities=MAX_NUM_ENTITIES, break_tok_idx=br_tok_idx).cuda(device)
+                       max_entities=MAX_NUM_ENTITIES, break_tok_idx=br_tok_idx, n_layers=N_LAYERS).cuda(device)
     if load_model:
         model.load_state_dict(torch.load(load_model))
 
@@ -88,10 +89,14 @@ def sample(load_model=None):
             continue
 
         # set initial states
-        states = torch.zeros(curr_batch_size, HIDDEN_SIZE).to(device), torch.zeros(curr_batch_size, HIDDEN_SIZE).to(device)
+        states = torch.zeros(N_LAYERS, curr_batch_size, HIDDEN_SIZE).to(device), torch.zeros(N_LAYERS, curr_batch_size, HIDDEN_SIZE).to(device)
 
         text = text.to(device)
-        pred_et, pred_eidx, pred_elen, out_xs = model.predict_entity(text, states)
+
+        try:
+            pred_et, pred_eidx, pred_elen, out_xs = model.predict_entity(text, states)
+        except EntityOverflow:
+            continue
 
         for i, (e_t_pred, e_t_tgt, e_idx_pred, e_idx_tgt) in enumerate(zip(pred_et, e_t.to(device), pred_eidx,
                                                                            e_idx.to(device))):
