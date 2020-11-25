@@ -311,7 +311,7 @@ class EntitiyNLM(nn.Module):
             )
         )
 
-    def predict_entity(self, xs, states, default_context=None):
+    def _predict_entity_id(self, xs, states, e_ts, default_context=None):
         h, c = states
         seq_len, batch = xs.shape
 
@@ -322,7 +322,71 @@ class EntitiyNLM(nn.Module):
         # initialize entity cache
         entity_cache = self.entity_encoder.initialize_e_cache(batch, device=xs.device)
 
-        import pdb; pdb.set_trace()
+        device = xs.device
+        null_eidx = torch.zeros(batch).long() - 1
+        null_elen = torch.ones(batch).long()
+
+        # set initial entity annotations
+        e_idx = null_eidx.clone().to(device)
+        e_len = null_elen.clone().to(device)
+
+        n_entities = torch.zeros(batch).long().to(device)  # track number of entities per batch for decoding
+
+        pred_e_ts, pred_e_idxs, pred_e_lens, out_e_ts, out_e_idxs, out_e_lens, out_xs = [], [], [], [], [], [], []
+        for i, x in enumerate(xs[:-1]):
+            e_t = e_ts[i]
+            final_tok = final_toks[i] if self.break_tok_idx is not None else None
+            (h, c), (out_e_t, out_e_idx, out_e_len, out_x), entity_cache = self.cell_forward(x, (h, c), entity_cache,
+                                                                                             (e_t, e_idx, e_len),
+                                                                                             final_tok=final_tok)
+            e_t = e_ts[i + 1]
+
+            # fix incorrectly predicted lengths
+            e_len = torch.where(e_t == 0, torch.ones_like(e_len).long().to(e_len.device), e_len)
+
+            # get next e_idx
+            e_idx_pred = out_e_idx.argmax(dim=1)
+            e_idx = torch.where(e_len > 1, e_idx,  # if still decoding same entity, make no changes
+                                torch.where(e_t == 0, null_eidx.clone().to(device),
+                                            # if next token is not an entity, set to null e_idx
+                                            torch.where(e_idx_pred == 0, n_entities,
+                                                        # otherwise, if new entity is predicted set idx to n_entities
+                                                        e_idx_pred - 1)))  # where seen entities are predicted undo the index shift made by the EntityEncoder (line 172)
+            # update n_entities
+            new_e_mask = np.logical_and(np.logical_and(e_len.cpu() == 1, e_t.cpu() > 0).type(torch.bool),
+                                        e_idx_pred.cpu() == 0).type(torch.bool)
+            n_entities[new_e_mask] = n_entities[new_e_mask] + 1
+
+            # get next e_len
+            e_len = torch.where(e_len > 1, e_len - 1,  # if still decoding, decrement e_len by one
+                                torch.where(e_t > 0, out_e_len.argmax(dim=1), null_elen.clone().to(device)))
+            # otherwise, if next token is an entity use model predicted length, otherwise set to 1
+
+            out_e_ts += [out_e_t]
+            out_e_idxs += [out_e_idx]
+            out_e_lens += [out_e_len]
+            pred_e_ts += [e_t]
+            pred_e_idxs += [e_idx]
+            pred_e_lens += [e_len]
+            out_xs += [out_x]
+
+        return (
+            torch.stack(out_e_ts), torch.stack(pred_e_ts),
+            torch.stack(out_e_idxs), torch.stack(pred_e_idxs),
+            torch.stack(out_e_lens), torch.stack(pred_e_lens),
+            torch.stack(out_xs)
+        )
+
+    def _sample_entity_forward(self, xs, states, default_context=None):
+        h, c = states
+        seq_len, batch = xs.shape
+
+        # get sentence completion mask
+        if self.break_tok_idx is not None:
+            final_toks = xs[1:] == self.break_tok_idx
+
+        # initialize entity cache
+        entity_cache = self.entity_encoder.initialize_e_cache(batch, device=xs.device)
 
         device = xs.device
         et_pos = torch.ones(batch).long()
@@ -336,40 +400,56 @@ class EntitiyNLM(nn.Module):
 
         n_entities = torch.zeros(batch).long().to(device)  # track number of entities per batch for decoding
 
-        pred_e_ts, pred_e_idxs, pred_e_lens, out_xs = [], [], [], []
-        with torch.no_grad():
-            for i, x in enumerate(xs[:-1]):
-                final_tok = final_toks[i] if self.break_tok_idx is not None else None
-                (h, c), (out_e_t, out_e_idx, out_e_len, out_x), entity_cache = self.cell_forward(x, (h, c), entity_cache,
-                                                                                                 (e_t, e_idx, e_len),
-                                                                                                 final_tok=final_tok)
-                # check if we are still decoding the previous entity
-                e_t = torch.where(e_len > 1, et_pos.clone().to(device), out_e_t.argmax(dim=1))
+        pred_e_ts, pred_e_idxs, pred_e_lens, out_e_ts, out_e_idxs, out_e_lens, out_xs = [], [], [], [], [], [], []
+        for i, x in enumerate(xs[:-1]):
+            final_tok = final_toks[i] if self.break_tok_idx is not None else None
+            (h, c), (out_e_t, out_e_idx, out_e_len, out_x), entity_cache = self.cell_forward(x, (h, c), entity_cache,
+                                                                                             (e_t, e_idx, e_len),
+                                                                                             final_tok=final_tok)
+            # check if we are still decoding the previous entity
+            e_t = torch.where(e_len > 1, et_pos.clone().to(device), out_e_t.argmax(dim=1))
 
-                # get next e_idx
-                e_idx_pred = out_e_idx.argmax(dim=1)
-                e_idx = torch.where(e_len > 1, e_idx,  # if still decoding same entity, make no changes
-                                    torch.where(e_t == 0, null_eidx.clone().to(device),  # if next token is not an entity, set to null e_idx
-                                                torch.where(e_idx_pred == 0, n_entities,  # otherwise, if new entity is predicted set idx to n_entities
-                                                            e_idx_pred - 1)))  # where seen entities are predicted undo the index shift made by the EntityEncoder (line 172)
-                # update n_entities
-                new_e_mask = np.logical_and(np.logical_and(e_len.cpu() > 1, e_t.cpu() == 0).type(torch.bool),
-                                            e_idx_pred.cpu() == 0).type(torch.bool)
-                n_entities[new_e_mask] = n_entities[new_e_mask] + 1
+            # get next e_idx
+            e_idx_pred = out_e_idx.argmax(dim=1)
+            e_idx = torch.where(e_len > 1, e_idx,  # if still decoding same entity, make no changes
+                                torch.where(e_t == 0, null_eidx.clone().to(device),  # if next token is not an entity, set to null e_idx
+                                            torch.where(e_idx_pred == 0, n_entities,  # otherwise, if new entity is predicted set idx to n_entities
+                                                        e_idx_pred - 1)))  # where seen entities are predicted undo the index shift made by the EntityEncoder (line 172)
+            # update n_entities
+            new_e_mask = np.logical_and(np.logical_and(e_len.cpu() == 1, e_t.cpu() > 0).type(torch.bool),
+                                        e_idx_pred.cpu() == 0).type(torch.bool)
+            n_entities[new_e_mask] = n_entities[new_e_mask] + 1
 
-                # get next e_len
-                e_len = torch.where(e_len > 1, e_len - 1,  # if still decoding, decrement e_len by one
-                                    torch.where(e_t > 0, out_e_len.argmax(dim=1), null_elen.clone().to(device)))
-                                    # otherwise, if next token is an entity use model predicted length, otherwise set to 1
+            # get next e_len
+            e_len = torch.where(e_len > 1, e_len - 1,  # if still decoding, decrement e_len by one
+                                torch.where(e_t > 0, out_e_len.argmax(dim=1), null_elen.clone().to(device)))
+                                # otherwise, if next token is an entity use model predicted length, otherwise set to 1
 
-                pred_e_ts += [e_t]
-                pred_e_idxs += [e_idx]
-                pred_e_lens += [e_len]
-                out_xs += [out_x]
+            out_e_ts += [out_e_t]
+            out_e_idxs += [out_e_idx]
+            out_e_lens += [out_e_len]
+            pred_e_ts += [e_t]
+            pred_e_idxs += [e_idx]
+            pred_e_lens += [e_len]
+            out_xs += [out_x]
 
         return (
-            torch.stack(pred_e_ts),
-            torch.stack(pred_e_idxs),
-            torch.stack(pred_e_lens),
+            torch.stack(out_e_ts), torch.stack(pred_e_ts),
+            torch.stack(out_e_idxs), torch.stack(pred_e_idxs),
+            torch.stack(out_e_lens), torch.stack(pred_e_lens),
             torch.stack(out_xs)
         )
+
+    def predict_entity(self, xs, states):
+        with torch.no_grad():
+            _, pred_e_ts, _, pred_e_idxs, _, pred_e_lens, out_xs = self._sample_entity_forward(xs, states)
+            return pred_e_ts, pred_e_idxs, pred_e_lens, out_xs
+
+    def forward_blind(self, xs, states):
+        out_e_ts, _, out_e_idxs, _, out_e_lens, _, out_xs = self._sample_entity_forward(xs, states)
+        return out_e_ts, out_e_idxs, out_e_lens, out_xs
+
+    def predict_entity_from_et(self, xs, states, e_ts):
+        with torch.no_grad():
+            _, _, _, pred_e_idxs, _, _, out_xs = self._predict_entity_id(xs, states, e_ts)
+            return pred_e_idxs, out_xs
