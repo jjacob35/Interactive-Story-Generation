@@ -10,7 +10,7 @@ warnings.filterwarnings("ignore")
 class StoryInitializer(object):
     def __init__(self):
         # Initialize BERT model
-        model = transformers.BertModel.from_pretrained('bert-base-uncased', return_dict=True)
+        model = transformers.BertModel.from_pretrained('bert-base-uncased', return_dict=True).cuda()
         tokenizer = transformers.BertTokenizer.from_pretrained('bert-base-uncased')
 
         # Initialize text generator pipeline
@@ -116,19 +116,19 @@ class StoryInitializer(object):
         self.magic_bert = list(self.bert_embedding(self.magic, model, tokenizer))
         self.intro['Magic'] = self.magic  # , self.magic_bert
         if str(self.magic.lower()) in ['true', 'yes', 'yeah']:
-            phrase_input = "{}, there is magic in your story.".format(self.magic.capitalize())
+            phrase_input = "There is magic in {}.".format(self.kingdom)
         else:
-            phrase_input = "{}, there is not magic in your story.".format(self.magic.capitalize())
+            phrase_input = "There is no magic in {}.".format(self.kingdom)
         gpt2_output = generate_output_text(phrase_input, generator_pipeline)
         print(gpt2_output)
         print()
 
-        self.sentiment = input(self.introduction()[4] + '\n')
-        self.sentiment_bert = list(self.bert_embedding(self.sentiment, model, tokenizer))
-        self.intro['Sentiment'] = self.sentiment  # , self.sentiment_bert
-        phrase_input = "The sentiment of your story is {}.".format(self.sentiment)
-        gpt2_output = generate_output_text(phrase_input, generator_pipeline)
-        print(gpt2_output)
+        # self.sentiment = input(self.introduction()[4] + '\n')
+        # self.sentiment_bert = list(self.bert_embedding(self.sentiment, model, tokenizer))
+        # self.intro['Sentiment'] = self.sentiment  # , self.sentiment_bert
+        # phrase_input = "The sentiment of your story is {}.".format(self.sentiment)
+        # gpt2_output = generate_output_text(phrase_input, generator_pipeline)
+        # print(gpt2_output)
 
         self.content_dictionary['Intro'] = self.intro
 
@@ -151,9 +151,9 @@ class StoryInitializer(object):
 
         self.archetype = input(self.characterinfo()[1] + '\n')
         if self.archetype[0].lower() in ['a', 'e', 'i', 'o', 'u']:
-            phrase_input = "Your {} is an {}.".format(self.creature, self.archetype)
+            phrase_input = "Your character, the {}, is an {}.".format(self.creature, self.archetype)
         else:
-            phrase_input = "Your {} is a {}.".format(self.creature, self.archetype)
+            phrase_input = "Your character, the {}, is a {}.".format(self.creature, self.archetype)
         self.archetype_bert = list(self.bert_embedding(self.archetype, model, tokenizer))
         self.charinfo['Archetype'] = self.archetype  # , self.archetype_bert
         gpt2_output = generate_output_text(phrase_input, generator_pipeline)
@@ -361,7 +361,7 @@ class StoryInitializer(object):
             return_token_type_ids=False,
             return_tensors='pt')
 
-        output = model(encoding['input_ids'], encoding['attention_mask'])
+        output = model(encoding['input_ids'].cuda(), encoding['attention_mask'].cuda())
         vector = output[0][0][0].detach().cpu().numpy()
 
         return vector
@@ -382,8 +382,8 @@ class StoryInitializer(object):
         return goal, motivation
 
     def interdiction(self):
-        danger = "What is the danger/risk of what your character wants to achieve?"
-        warning = "Someone warns your character of the danger of achieving this goal. What is the advice?"
+        danger = "What is the danger of your character's goal?"
+        warning = "What warning or advice does your character receive?"
         giver = "Who gives your character this advice?"
 
         return danger, warning, giver
@@ -408,17 +408,17 @@ class StoryInitializer(object):
         return villainy, lack, villain_goal, villain_action, object_lacked
 
     def mediation(self):
-        hero_preparation = "How does your character prepare for the upcoming conflict with the villain (e.g., by addressing lack)?"
+        hero_preparation = "How does your character prepare for the conflict (e.g., by addressing lack)?"
 
         return hero_preparation
 
     def punishment(self):
-        villain_punishment = "How do your character and the other heroes punish the villain?"
+        villain_punishment = "How is the villain punished?"
 
         return villain_punishment
 
     def wedding(self):
-        hero_reward = 'What positive reward/event do your character and the other heroes get in your character\'s story?'
+        hero_reward = 'What positive reward/event do your character and the other heroes get?'
 
         return hero_reward
 
